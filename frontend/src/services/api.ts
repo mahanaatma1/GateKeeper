@@ -1,32 +1,13 @@
 'use client';
 
-import axios from 'axios';
+import axios, { AxiosInstance, AxiosResponse, AxiosRequestConfig } from 'axios';
 
-// Disable console logs in production and optionally in development
-const DEBUG = false; // Set to true to enable logs
-const log = DEBUG ? console.log : () => {};
-const warn = DEBUG ? console.warn : () => {};
-const errorLog = DEBUG ? console.error : () => {}; // Renamed to avoid conflict
-
-// Flag to track if API calls are in progress
-const apiCallsInProgress = new Map<string, boolean>();
-const apiCallTimeouts = new Map<string, NodeJS.Timeout>();
-
-// Add timestamp tracking for rate limiting
-const lastRequestTimestamps = new Map<string, number>();
+// Constants
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+const DEFAULT_TIMEOUT = 30000; // 30 seconds
 const REQUEST_THROTTLE_MS = 3000; // Minimum 3 seconds between identical requests
 
-// Create axios instance with base URL
-const API = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000',
-  headers: {
-    'Content-Type': 'application/json',
-  },
-  // Set a reasonable timeout for all requests
-  timeout: 8000,
-});
-
-// Create a custom error interface for more descriptive errors
+// Custom error interface
 interface ApiError extends Error {
   userFriendlyMessage?: string;
   isNetworkError?: boolean;
@@ -35,7 +16,21 @@ interface ApiError extends Error {
   response?: any;
 }
 
-// Add authorization header to requests if token exists
+// Request tracking
+const apiCallsInProgress = new Map<string, boolean>();
+const apiCallTimeouts = new Map<string, NodeJS.Timeout>();
+const lastRequestTimestamps = new Map<string, number>();
+
+// Configure axios instance with longer timeout
+const API = axios.create({
+  baseURL: API_URL,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+  timeout: DEFAULT_TIMEOUT,
+});
+
+// Add auth token to requests
 API.interceptors.request.use((config) => {
   if (typeof window !== 'undefined') {
     const token = localStorage.getItem('token');
@@ -46,13 +41,11 @@ API.interceptors.request.use((config) => {
   return config;
 });
 
-// Add a global error handler for network issues
+// Global error handler
 API.interceptors.response.use(
-  (response) => {
-    return response;
-  },
+  (response) => response,
   (error) => {
-    // Enhanced network error detection - check various conditions
+    // Network error detection
     const isNetworkError = (
       error.message === 'Network Error' || 
       error.code === 'ERR_NETWORK' ||
@@ -64,12 +57,11 @@ API.interceptors.response.use(
     );
     
     if (isNetworkError) {
-      errorLog('API: Network error detected:', error.message);
       error.isNetworkError = true;
       error.userFriendlyMessage = 'Unable to connect to the server. Please check your internet connection.';
     }
     
-    // Handle aborted requests or timeouts
+    // Timeout detection
     if (
       error.code === 'ERR_CANCELED' || 
       error.name === 'AbortError' || 
@@ -77,13 +69,12 @@ API.interceptors.response.use(
       error.code === 'ECONNABORTED' ||
       error.message?.includes('timeout')
     ) {
-      errorLog('API: Request was aborted, canceled, or timed out:', error.message);
       error.isAborted = true;
       error.userFriendlyMessage = 'Request took too long to complete. Please try again.';
     }
     
-    // Always clear any in-progress flags for this request
-    if (error.config && error.config.url) {
+    // Clear progress flag for this request
+    if (error.config?.url) {
       const callKey = `${error.config.method}_${error.config.url}`;
       apiCallsInProgress.set(callKey, false);
     }
@@ -92,40 +83,8 @@ API.interceptors.response.use(
   }
 );
 
-// Add a helper to ensure all requests have a timeout
-const safeRequest = async (requestFn: Promise<any> | (() => Promise<any>), timeoutMs = 8000) => {
-  // Create an abort controller for the timeout
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => {
-    controller.abort();
-  }, timeoutMs);
-  
-  try {
-    // If requestFn is a function, call it with the signal
-    // If it's already a promise, just await it
-    const result = typeof requestFn === 'function'
-      ? await requestFn()
-      : await requestFn;
-      
-    clearTimeout(timeoutId);
-    return result;
-  } catch (error: any) {
-    clearTimeout(timeoutId);
-    
-    // Add a check for timeout-related errors
-    if (error.name === 'AbortError') {
-      const timeoutError = new Error('Request timed out') as ApiError;
-      timeoutError.name = 'TimeoutError';
-      timeoutError.userFriendlyMessage = 'Request took too long. Please try again.';
-      throw timeoutError;
-    }
-    
-    throw error;
-  }
-};
-
-// Function to wrap any request with a timeout and proper error handling
-const withTimeout = async (request: Promise<any>, timeoutMs = 8000) => {
+// Request helper functions
+function withTimeout<T>(request: Promise<T>, timeoutMs = DEFAULT_TIMEOUT): Promise<T> {
   return Promise.race([
     request,
     new Promise<never>((_, reject) => {
@@ -137,109 +96,73 @@ const withTimeout = async (request: Promise<any>, timeoutMs = 8000) => {
       }, timeoutMs);
     })
   ]);
-};
+}
 
-// Function to safely mark API call as complete
-const markApiCallComplete = (callKey: string) => {
-  // Clear any existing timeout for this call
+function markApiCallComplete(callKey: string): void {
   const existingTimeout = apiCallTimeouts.get(callKey);
   if (existingTimeout) {
     clearTimeout(existingTimeout);
-    apiCallTimeouts.delete(callKey);
   }
   
-  // Set a new timeout to mark the call as complete
   const timeoutId = setTimeout(() => {
     apiCallsInProgress.set(callKey, false);
     apiCallTimeouts.delete(callKey);
-  }, 1000); // Extended the delay to prevent immediate retries
+  }, 1000);
   
   apiCallTimeouts.set(callKey, timeoutId);
-};
+}
 
-// Helper to check if a call is in progress
-const isCallInProgress = (callKey: string): boolean => {
-  return apiCallsInProgress.get(callKey) === true;
-};
-
-// Check if a request should be throttled (identical request too soon)
-const shouldThrottleRequest = (requestType: string, uniqueKey: string): boolean => {
+function shouldThrottleRequest(requestType: string, uniqueKey: string): boolean {
   const now = Date.now();
   const key = `${requestType}_${uniqueKey}`;
   const lastTime = lastRequestTimestamps.get(key) || 0;
   
-  // Check if this request type happened too recently
   if (now - lastTime < REQUEST_THROTTLE_MS) {
     return true;
   }
   
-  // Update the timestamp for this request type
   lastRequestTimestamps.set(key, now);
   return false;
-};
+}
 
 // Auth API calls
 export const authAPI = {
-  sendOTP: async (email: string, userData?: { firstName?: string; lastName?: string; email?: string; password?: string; isResend?: boolean }) => {
-    // Create a base key without timestamp for throttling check
+  sendOTP: async (email: string, userData?: { 
+    firstName?: string; 
+    lastName?: string; 
+    email?: string; 
+    password?: string; 
+    isResend?: boolean 
+  }) => {
     const baseKey = `sendOTP_${email}_${userData?.isResend ? 'resend' : 'new'}`;
     
-    // Check if this is a duplicate request that should be throttled
     if (shouldThrottleRequest('sendOTP', baseKey)) {
       return Promise.reject(new Error('Please wait a moment before requesting another code'));
     }
     
-    // Create a unique key for this API call with timestamp to prevent blocking
     const callKey = `${baseKey}_${Date.now()}`;
+    apiCallsInProgress.set(callKey, true);
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT);
     
     try {
-      // Mark this call as in progress
-      apiCallsInProgress.set(callKey, true);
-      
-      // Make sure email is properly included in the request body
       const requestBody = { 
         email, 
         ...userData,
-        // Explicitly include isResend flag
         isResend: userData?.isResend === true
       };
       
-      // Use the abort controller and a timeout to ensure the request doesn't hang
-      const controller = new AbortController();
+      const response = await withTimeout(
+        API.post('/api/auth/send-registration-otp', requestBody, {
+          signal: controller.signal,
+          timeout: DEFAULT_TIMEOUT
+        })
+      );
       
-      try {
-        // Set a timeout to abort the request if it takes too long
-        const timeoutId = setTimeout(() => {
-          controller.abort();
-        }, 8000);
-        
-        // Make the request with the abort signal and use our withTimeout wrapper
-        const response = await withTimeout(
-          API.post('/api/auth/send-registration-otp', requestBody, {
-            signal: controller.signal,
-            timeout: 8000 // Also set axios timeout for added safety
-          }),
-          10000 // Slightly longer timeout for the race
-        );
-        
-        // Clear the timeout since the request completed
-        clearTimeout(timeoutId);
-        
-        return response.data;
-      } catch (error: any) {
-        // Check if this was a timeout or abort
-        if (error.code === 'ERR_CANCELED' || error.name === 'AbortError' || 
-            error.name === 'CanceledError' || error.name === 'TimeoutError') {
-          const timeoutError = new Error('OTP request timed out. Please try again.') as ApiError;
-          timeoutError.name = 'TimeoutError';
-          timeoutError.userFriendlyMessage = 'Request took too long. Please try again.';
-          throw timeoutError;
-        }
-        
-        throw error;
-      }
+      return response.data;
     } catch (error: any) {
-      // Add user-friendly messages based on error codes from backend
+      // Add user-friendly messages
       if (error.isNetworkError || error.message === 'Network Error') {
         error.userFriendlyMessage = 'Unable to connect to the server. Please check your internet connection.';
       } else if (error.response?.data?.code === 'ALREADY_VERIFIED') {
@@ -249,61 +172,34 @@ export const authAPI = {
       } else if (error.response?.data?.code === 'INVALID_EMAIL') {
         error.userFriendlyMessage = 'Please provide a valid email address.';
       } else if (error.response?.status === 400 || error.response?.status === 409) {
-        // Handle specific API errors with user-friendly messages
         error.userFriendlyMessage = error.response?.data?.message || 'There was a problem processing your request.';
       }
       
       throw error;
     } finally {
-      // Always mark the call as completed, even if there was an error
+      clearTimeout(timeoutId);
       markApiCallComplete(callKey);
     }
   },
 
   verifyEmail: async (data: { email: string; otp: string }) => {
-    // Create a unique key for this API call to prevent duplicates
     const callKey = `verifyEmail_${data.email}_${data.otp}_${Date.now()}`;
+    apiCallsInProgress.set(callKey, true);
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT);
     
     try {
-      // Mark this call as in progress
-      apiCallsInProgress.set(callKey, true);
+      const response = await withTimeout(
+        API.post('/api/auth/verify-email', data, {
+          signal: controller.signal,
+          timeout: DEFAULT_TIMEOUT
+        })
+      );
       
-      // Use the abort controller and a timeout to ensure the request doesn't hang
-      const controller = new AbortController();
-      
-      try {
-        // Set a timeout to abort the request if it takes too long
-        const timeoutId = setTimeout(() => {
-          controller.abort();
-        }, 8000);
-        
-        // Make the request with the abort signal
-        const response = await withTimeout(
-          API.post('/api/auth/verify-email', data, {
-            signal: controller.signal,
-            timeout: 8000
-          }),
-          10000
-        );
-        
-        // Clear the timeout since the request completed
-        clearTimeout(timeoutId);
-        
-        return response.data;
-      } catch (error: any) {
-        // Check if this was a timeout or abort
-        if (error.code === 'ERR_CANCELED' || error.name === 'AbortError' || 
-            error.name === 'CanceledError' || error.name === 'TimeoutError') {
-          const timeoutError = new Error('Verification request timed out. Please try again.') as ApiError;
-          timeoutError.name = 'TimeoutError';
-          timeoutError.userFriendlyMessage = 'Request took too long. Please try again.';
-          throw timeoutError;
-        }
-        
-        throw error;
-      }
+      return response.data;
     } catch (error: any) {
-      // Add user-friendly messages based on error codes from backend
+      // Add user-friendly messages
       if (error.isNetworkError || error.message === 'Network Error') {
         error.userFriendlyMessage = 'Unable to connect to the server. Please check your internet connection.';
       } else if (error.response?.data?.code === 'OTP_EXPIRED') {
@@ -313,57 +209,28 @@ export const authAPI = {
       } else if (error.response?.data?.code === 'USER_NOT_FOUND') {
         error.userFriendlyMessage = 'User not found with this email. Please register first.';
       } else if (error.response?.status === 400 || error.response?.status === 401) {
-        // Common status codes for invalid OTP
         error.userFriendlyMessage = error.response?.data?.message || 'Invalid verification code. Please check and try again.';
       }
       
       throw error;
     } finally {
-      // Always mark the call as completed, even if there was an error
+      clearTimeout(timeoutId);
       markApiCallComplete(callKey);
     }
   },
 
   register: async (userData: { firstName: string; lastName: string; email: string; password: string }) => {
     try {
-      log('API: Registering user:', userData.email);
       const response = await API.post('/api/auth/register', userData);
-      log('API: Registration successful, response:', response.data);
       return response.data;
     } catch (error: any) {
-      // Detailed logging for debugging
-      errorLog('API: Registration error details:', {
-        status: error.response?.status,
-        statusText: error.response?.statusText,
-        data: error.response?.data,
-        message: error.message
-      });
-
-      // Check if this is a 400 Bad Request, which likely means email already exists
-      if (error.response?.status === 400) {
-        errorLog('API: Registration error - Email already registered:', userData.email);
-        
-        // Transform error to have a consistent format
-        error.response.data = {
-          ...error.response.data,
-          message: 'This email is already registered. Please log in instead.',
-          code: 'EMAIL_EXISTS'
-        };
-        
-        throw error;
-      }
-      
-      // Check for other specific error types
-      if (error.response?.status === 409 || // Conflict status code for duplicate
-          error.response?.data?.code === 11000 || // MongoDB duplicate key error
+      // Handle duplicate email
+      if (error.response?.status === 400 || 
+          error.response?.status === 409 || 
+          error.response?.data?.code === 11000 || 
           (error.response?.data?.message && 
-           (error.response.data.message.toLowerCase().includes('already exists') || 
-            error.response.data.message.toLowerCase().includes('already registered') ||
-            error.response.data.message.toLowerCase().includes('email is taken') ||
-            error.response.data.message.toLowerCase().includes('duplicate')))) {
-        errorLog('API: Registration error - Email already registered:', userData.email);
+           error.response.data.message.toLowerCase().includes('already exists'))) {
         
-        // Transform error to have a consistent format
         if (!error.response) error.response = {};
         if (!error.response.data) error.response.data = {};
         
@@ -372,8 +239,6 @@ export const authAPI = {
           message: 'This email is already registered. Please log in instead.',
           code: 'EMAIL_EXISTS'
         };
-      } else {
-        errorLog('API: Registration error:', error.response?.data || error.message || error);
       }
       throw error;
     }
@@ -381,35 +246,94 @@ export const authAPI = {
 
   login: async (credentials: { email: string; password: string }) => {
     try {
-      const response = await API.post('/api/auth/login', credentials);
+      // Validate inputs
+      if (!credentials.email || !credentials.password) {
+        throw new Error('Email and password are required');
+      }
+      
+      if (!credentials.email.includes('@')) {
+        throw new Error('Please enter a valid email address');
+      }
+      
+      // Make request
+      const response = await API.post('/api/auth/login', {
+        email: credentials.email.trim(),
+        password: credentials.password
+      });
+      
       return response.data;
-    } catch (error) {
+    } catch (error: any) {
+      // Add user-friendly messages
+      if (error.isNetworkError || error.message === 'Network Error') {
+        error.userFriendlyMessage = 'Unable to connect to the server. Please check your internet connection.';
+      } else if (error.response?.data?.code === 'NEEDS_VERIFICATION') {
+        error.userFriendlyMessage = 'Please verify your email before logging in.';
+      } else if (error.response?.data?.code === 'INVALID_CREDENTIALS') {
+        error.userFriendlyMessage = 'Invalid email or password. Please try again.';
+      } else if (error.response?.data?.code === 'USER_NOT_FOUND') {
+        error.userFriendlyMessage = 'No account found with this email. Please sign up first.';
+      }
+      
       throw error;
     }
   },
 
-  // Request password reset
   forgotPassword: async (data: { email: string }) => {
     try {
+      // Validate email
+      if (!data.email) {
+        return {
+          success: false,
+          message: 'Email address is required'
+        };
+      }
+      
+      const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailPattern.test(data.email)) {
+        return {
+          success: false,
+          message: 'Please enter a valid email address'
+        };
+      }
+      
       const response = await API.post('/api/auth/forgot-password', data);
+      
       return {
-        ...response.data,
-        // Ensure success is included
-        success: response.data.success
+        success: true,
+        message: 'Password reset email sent successfully',
+        ...response.data
       };
-    } catch (error) {
-      errorLog('API: Error requesting password reset:', error);
-      throw error;
+    } catch (error: any) {
+      // Return friendly error messages
+      if (error.isNetworkError || error.message === 'Network Error') {
+        return {
+          success: false,
+          message: 'Unable to connect to the server. Please check your internet connection.'
+        };
+      } else if (error.response?.data?.code === 'USER_NOT_FOUND') {
+        return {
+          success: false,
+          message: 'No account found with this email address. Please check your email.'
+        };
+      } else if (error.response?.data?.code === 'EMAIL_SEND_FAILED') {
+        return {
+          success: false,
+          message: 'Failed to send password reset email. Please try again later.'
+        };
+      }
+      
+      return {
+        success: false,
+        message: error.response?.data?.message || 'Failed to process password reset request. Please try again.'
+      };
     }
   },
   
-  // Reset password with token
   resetPassword: async (data: { email: string; token: string; newPassword: string }) => {
     try {
       const response = await API.post('/api/auth/reset-password', data);
       return response.data;
     } catch (error) {
-      errorLog('API: Error resetting password:', error);
       throw error;
     }
   },
@@ -422,10 +346,21 @@ export const userAPI = {
       const response = await API.get('/api/users/me');
       return response.data;
     } catch (error) {
-      errorLog('Get user error:', error);
       throw error;
     }
   },
+  
+  uploadProfileImage: async (file: File) => {
+    const formData = new FormData();
+    formData.append('profileImage', file);
+
+    const response = await API.post('/api/users/profile-image', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    return response.data;
+  }
 };
 
 export default API; 

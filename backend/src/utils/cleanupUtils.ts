@@ -1,9 +1,6 @@
 import User from '../models/userModel';
 
-/**
- * Delete unverified users who registered more than X hours ago
- * @param hours Number of hours after which to delete unverified users
- */
+//Delete unverified users older than 24 hours
 export const deleteUnverifiedUsers = async (hours: number = 24): Promise<void> => {
   try {
     // Calculate the cutoff date

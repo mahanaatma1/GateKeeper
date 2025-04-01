@@ -1,8 +1,3 @@
-/**
- * Email validation utilities
- * Helps prevent temporary/disposable email addresses
- */
-
 // Common disposable email domains
 const disposableDomains = [
   '10minutemail.com', 'tempmail.com', 'throwawaymail.com', 'mailinator.com',
@@ -20,21 +15,13 @@ const disposableDomains = [
   'tempemails.net', 'emailtemp.org', 'instantemailaddress.com', 'emailsecrete.com'
 ];
 
-/**
- * Basic email format validation
- * @param email Email to validate
- * @returns boolean indicating if email format is valid
- */
+//Validate email format
 export const isValidEmailFormat = (email: string): boolean => {
   const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
   return emailRegex.test(email);
 };
 
-/**
- * Check if email is from a disposable domain
- * @param email Email to check
- * @returns boolean indicating if email is from a disposable domain
- */
+//Check if email is disposable
 export const isDisposableEmail = (email: string): boolean => {
   const domain = email.split('@')[1]?.toLowerCase();
   if (!domain) return false;
@@ -68,11 +55,7 @@ export const isDisposableEmail = (email: string): boolean => {
   return false;
 };
 
-/**
- * Complete email validation
- * @param email Email to validate
- * @returns object with validation result and error message if any
- */
+//Validate email address
 export const validateEmail = (email: string): { valid: boolean; error?: string } => {
   if (!email) {
     return { valid: false, error: 'Email is required' };

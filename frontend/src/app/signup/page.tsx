@@ -17,8 +17,6 @@ export default function Signup() {
   }, [clearError]);
 
   const handleSignupSuccess = (email: string) => {
-    console.log("Signup successful, redirecting to verify email page with email:", email);
-    
     // Use router for client-side navigation
     router.push(`/verify-email?email=${encodeURIComponent(email)}&autoSend=true`);
   };

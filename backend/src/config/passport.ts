@@ -42,8 +42,7 @@ const oAuthConfigs = {
     clientID: process.env.LINKEDIN_CLIENT_ID || '',
     clientSecret: process.env.LINKEDIN_CLIENT_SECRET || '',
     callbackURL: process.env.LINKEDIN_CALLBACK_URL || `${process.env.BACKEND_URL || 'http://localhost:5000'}/api/auth/linkedin/callback`,
-    scope: ['r_liteprofile', 'r_emailaddress'],
-    profileFields: ['id', 'first-name', 'last-name', 'email-address'],
+    scope: ['openid', 'profile', 'email'],
     state: true
   },
   facebook: {
@@ -63,88 +62,117 @@ async function handleOAuthProfile(
   done: DoneCallback
 ) {
   try {
-    // Extract email from profile
-    const email = profile.emails && profile.emails.length > 0 
-      ? profile.emails[0].value 
-      : '';
+    // Get email and check development mode
+    const email = profile.emails?.[0]?.value || '';
+    const isDevelopment = process.env.NODE_ENV === 'development';
+    const isLinkedIn = providerName === 'LinkedIn';
 
+    // Handle development mode for LinkedIn
+    if (isDevelopment && isLinkedIn && !email) {
+      const existingUser = await User.findOne({ [providerIdField]: profile.id });
+      if (existingUser) {
+        return done(null, { ...existingUser.toObject(), provider: 'linkedin' });
+      }
+
+      const newUser = await User.create({
+        email: `linkedin-${profile.id}@dev-placeholder.com`,
+        firstName: profile.name?.givenName || 'LinkedIn',
+        lastName: profile.name?.familyName || 'User',
+        password: await generateRandomPassword(),
+        [providerIdField]: profile.id,
+        isVerified: true
+      });
+
+      return done(null, { ...newUser.toObject(), provider: 'linkedin' });
+    }
+
+    // Require email for production
     if (!email) {
-      return done(new Error(`Could not retrieve email from ${providerName}`));
+      return done(new Error(`No email found from ${providerName}`));
     }
 
-    // Extract provider username - e.g. GitHub username, Google display name, etc.
-    let providerUsername = '';
-    if (providerName === 'GitHub') {
-      providerUsername = profile.username || '';
-    } else if (providerName === 'Google') {
-      providerUsername = profile.displayName || '';
-    } else if (providerName === 'LinkedIn') {
-      providerUsername = `${profile.name?.givenName || ''} ${profile.name?.familyName || ''}`.trim();
-    } else if (providerName === 'Facebook') {
-      providerUsername = profile.displayName || '';
-    }
+    // Get username based on provider
+    const providerUsername = providerName === 'GitHub' ? profile.username :
+      providerName === 'Google' ? profile.displayName :
+      providerName === 'LinkedIn' ? `${profile.name?.givenName || ''} ${profile.name?.familyName || ''}`.trim() || profile.displayName :
+      profile.displayName;
 
-    // Check if user exists with provider ID
-    const query = { [providerIdField]: profile.id };
-    let user = await User.findOne(query);
+    // Find or create user
+    let user = await User.findOne({ [providerIdField]: profile.id });
     
-    if (user) {
-      // Add provider info but don't set useProviderUsername to true
-      // if we already have this user registered with the provider
-      const userObj = user.toObject() as IOAuthUser;
-      userObj.providerUsername = providerUsername;
-      userObj.provider = providerName.toLowerCase();
+    if (!user) {
+      // Look for a user with the same email
+      user = await User.findOne({ email });
       
-      // Flag to control name display preference - set it to false
-      // if the user created their account manually before OAuth
-      userObj.useProviderUsername = false;
-      return done(null, userObj);
-    }
-    
-    // Check if user exists with email
-    user = await User.findOne({ email });
-
-    if (user) {
-      // Link provider to existing account
-      user[providerIdField] = profile.id;
-      user.isVerified = true;
-      await user.save();
+      if (user) {
+        console.log(`Linking ${providerName} account to existing user with email ${email}`);
+        
+        // Link the accounts by adding the provider ID
+        user[providerIdField] = profile.id;
+        user.isVerified = true;
+        
+        // If the user doesn't have a profile image but the provider does, use the provider's image
+        if (!user.profileImage && profile.photos && profile.photos.length > 0) {
+          user.profileImage = profile.photos[0].value;
+          console.log(`Added profile image from ${providerName} to existing user account`);
+        }
+        
+        await user.save();
+        console.log(`Successfully linked ${providerName} account to existing user`);
+      } else {
+        // Create a completely new user
+        // Try to get profile image from the OAuth provider
+        let profileImage = '';
+        
+        if (providerName === 'Google' && profile.photos && profile.photos.length > 0) {
+          profileImage = profile.photos[0].value;
+        } else if (providerName === 'GitHub' && profile.photos && profile.photos.length > 0) {
+          profileImage = profile.photos[0].value;
+        } else if (providerName === 'LinkedIn' && profile.photos && profile.photos.length > 0) {
+          profileImage = profile.photos[0].value;
+        } else if (providerName === 'Facebook' && profile.photos && profile.photos.length > 0) {
+          profileImage = profile.photos[0].value;
+        }
+        
+        user = await User.create({
+          email,
+          firstName: profile.name?.givenName || providerName,
+          lastName: profile.name?.familyName || 'User',
+          password: await generateRandomPassword(),
+          [providerIdField]: profile.id,
+          isVerified: true,
+          profileImage: profileImage || undefined
+        });
+        console.log(`Created new user with ${providerName} profile and email ${email}`);
+      }
+    } else {
+      console.log(`Found existing user with ${providerName} ID ${profile.id}`);
       
-      // Add provider info but set useProviderUsername to false
-      // because this user already exists with manual registration
-      const userObj = user.toObject() as IOAuthUser;
-      userObj.providerUsername = providerUsername;
-      userObj.provider = providerName.toLowerCase();
-      userObj.useProviderUsername = false;
-      return done(null, userObj);
+      // Check if this OAuth account's email is associated with another account
+      const emailAccount = await User.findOne({ email, _id: { $ne: user._id } });
+      if (emailAccount) {
+        console.log(`Found another account with same email ${email}. Merging accounts...`);
+        
+        // If the email account has a profile image and this account doesn't, copy it
+        if (emailAccount.profileImage && !user.profileImage) {
+          user.profileImage = emailAccount.profileImage;
+          console.log(`Copied profile image from email account to OAuth account`);
+        }
+        await user.save();
+      }
     }
 
-    // Create new user if not found
-    const firstName = profile.name?.givenName || profile.displayName?.split(' ')[0] || `${providerName}`;
-    const lastName = profile.name?.familyName || profile.displayName?.split(' ').slice(1).join(' ') || 'User';
-    
-    // Generate a random password
-    const randomPassword = await generateRandomPassword();
-
-    const newUser = new User({
-      email,
-      firstName,
-      lastName,
-      password: randomPassword,
-      [providerIdField]: profile.id,
-      isVerified: true // OAuth users are pre-verified
+    // Return user with provider info
+    const userObj = user.toObject() as IOAuthUser;
+    return done(null, {
+      ...userObj,
+      provider: providerName.toLowerCase(),
+      providerUsername,
+      useProviderUsername: !user[providerIdField] // Only true for new users
     });
 
-    await newUser.save();
-    
-    // Add provider info and set useProviderUsername to true
-    // because this is a new user created via OAuth
-    const newUserObj = newUser.toObject() as IOAuthUser;
-    newUserObj.providerUsername = providerUsername;
-    newUserObj.provider = providerName.toLowerCase();
-    newUserObj.useProviderUsername = true;
-    return done(null, newUserObj);
   } catch (error) {
+    console.error(`Error in handleOAuthProfile for ${providerName}:`, error);
     return done(error as Error);
   }
 }
@@ -173,45 +201,27 @@ if (oAuthConfigs.github.clientID && oAuthConfigs.github.clientSecret) {
   );
 }
 
-// Configure LinkedIn strategy
+// Configure LinkedIn strategy with OAuth 2.0
 if (oAuthConfigs.linkedin.clientID && oAuthConfigs.linkedin.clientSecret) {
   passport.use(
     new LinkedInStrategy(
       oAuthConfigs.linkedin,
       async (accessToken: string, refreshToken: string, profile: any, done: DoneCallback) => {
         try {
-          // Check if we have a valid profile with an ID
-          if (profile && profile.id) {
-            // Check if profile has emails
-            if (!profile.emails || profile.emails.length === 0) {
-              // Try to fetch email via LinkedIn API
-              try {
-                const emailResponse = await axios.get('https://api.linkedin.com/v2/emailAddress?q=members&projection=(elements*(handle~))', {
-                  headers: {
-                    'Authorization': `Bearer ${accessToken}`,
-                    'X-Restli-Protocol-Version': '2.0.0'
-                  }
-                });
-                
-                if (emailResponse.data?.elements?.[0]?.['handle~']?.emailAddress) {
-                  const email = emailResponse.data.elements[0]['handle~'].emailAddress;
-                  profile.emails = [{ value: email }];
-                }
-              } catch (emailError: any) {
-                // If email fetch fails, use a placeholder email if absolutely necessary
-                if (!profile.emails || profile.emails.length === 0) {
-                  const placeholderEmail = `linkedin-${profile.id}@example.com`;
-                  profile.emails = [{ value: placeholderEmail }];
-                }
-              }
-            }
-            
-            return await handleOAuthProfile(profile, 'linkedinId', 'LinkedIn', done);
-          } else {
-            return done(new Error('Invalid LinkedIn profile received - missing ID'));
+          // Validate required profile data
+          if (!profile.id) {
+            return done(new Error('Missing LinkedIn profile ID'));
           }
+
+          if (!profile.emails || !profile.emails[0] || !profile.emails[0].value) {
+            return done(new Error('Missing email in LinkedIn profile'));
+          }
+
+          // Use the common handleOAuthProfile function
+          await handleOAuthProfile(profile, 'linkedinId', 'LinkedIn', done);
+
         } catch (error: any) {
-          return done(error);
+          return done(error as Error);
         }
       }
     )
@@ -230,5 +240,13 @@ if (oAuthConfigs.facebook.clientID && oAuthConfigs.facebook.clientSecret) {
   );
 }
 
+// Required for OAuth State validation
+passport.serializeUser((user, done) => {
+  done(null, user);
+});
+
+passport.deserializeUser((obj, done) => {
+  done(null, obj);
+});
 
 export default passport; 

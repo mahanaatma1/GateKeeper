@@ -13,6 +13,7 @@ import {
   logout
 } from '../controllers/authControllers';
 import { AuthRequest } from '../middlewares/authMiddleware';
+import { syncProfilesByEmail } from '../middlewares/profileSyncMiddleware';
 
 // Extend passport modules with type definitions
 declare module 'passport-local' {
@@ -50,7 +51,7 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
 // Basic auth routes
 router.post('/register', register);
-router.post('/login', login);
+router.post('/login', login, syncProfilesByEmail);
 router.post('/logout', logout);
 router.post('/verify-email', verifyEmail);
 router.post('/resend-verification', resendVerificationCode);
@@ -59,66 +60,85 @@ router.post('/refresh-token', refreshAccessToken);
 router.post('/forgot-password', forgotPassword);
 router.post('/reset-password', resetPasswordWithToken);
 
-// Configure OAuth providers (common configuration)
-const configureOAuthRoutes = (providerName: string, scopes: string[]) => {
-  // Auth initiation route
-  router.get(`/${providerName}`, (req: Request, res: Response, next: NextFunction) => {
-    passport.authenticate(providerName, { 
-      scope: scopes,
-      session: false 
+// OAuth route configuration
+const configureOAuthRoute = (provider: string, scopes: string[]) => {
+  // Initiation route
+  router.get(`/${provider}`, (req: Request, res: Response, next: NextFunction) => {
+    passport.authenticate(provider, { 
+      scope: scopes, 
+      session: true,
+      prompt: 'select_account' // Force account selection
     })(req, res, next);
   });
 
-  // Auth callback route
+  // Callback route
   router.get(
-    `/${providerName}/callback`,
+    `/${provider}/callback`,
     (req: Request, res: Response, next: NextFunction) => {
-      passport.authenticate(providerName, {
-        session: false,
-        failureRedirect: `${FRONTEND_URL}/login?error=${encodeURIComponent(`Authentication failed with ${providerName}`)}`
+      const error = req.query.error as string;
+      if (error) {
+        return res.redirect(`${FRONTEND_URL}/login?error=${encodeURIComponent(error)}`);
+      }
+      
+      passport.authenticate(provider, {
+        session: true,
+        failureRedirect: `${FRONTEND_URL}/login?error=Authentication failed`
       })(req, res, next);
     },
-    // Success handler (cast req to AuthRequest to access user property)
-    (req: Request, res: Response) => oAuthCallback(req as AuthRequest, res)
+    syncProfilesByEmail,
+    oAuthCallback
   );
 };
 
-// Set up OAuth routes for each provider
-if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
-  configureOAuthRoutes('google', ['profile', 'email']);
+// Configure OAuth providers
+if (process.env.GOOGLE_CLIENT_ID) {
+  configureOAuthRoute('google', ['profile', 'email']);
 }
 
-if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
-  configureOAuthRoutes('github', ['user:email']);
+if (process.env.GITHUB_CLIENT_ID) {
+  configureOAuthRoute('github', ['user:email']);
 }
 
-if (process.env.LINKEDIN_CLIENT_ID && process.env.LINKEDIN_CLIENT_SECRET) {
-  configureOAuthRoutes('linkedin', ['r_liteprofile', 'r_emailaddress']);
+if (process.env.LINKEDIN_CLIENT_ID) {
+  configureOAuthRoute('linkedin', ['openid', 'profile', 'email']);
 }
 
-if (process.env.FACEBOOK_CLIENT_ID && process.env.FACEBOOK_CLIENT_SECRET) {
-  configureOAuthRoutes('facebook', ['email']);
+if (process.env.FACEBOOK_CLIENT_ID) {
+  configureOAuthRoute('facebook', ['email']);
 }
 
-// Add Facebook data deletion callback URL
-router.post('/facebook/data-deletion', (req: Request, res: Response) => {
-  try {
-    // Facebook sends a signed_request parameter
-    const signedRequest = req.body.signed_request;
-    
-    if (!signedRequest) {
-      res.status(400).json({ error: 'Missing signed_request parameter' });
-      return;
-    }
-    
-    // Return a confirmation status URL as per Facebook requirements
-    res.json({
-      url: `${FRONTEND_URL}/data-deletion`,
-      confirmation_code: `gatekeeper-${Date.now()}`
-    });
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
+// Facebook data deletion callback
+const handleDataDeletion: RequestHandler = (req, res) => {
+  if (!req.body.signed_request) {
+    res.status(400).json({ error: 'Missing signed_request parameter' });
+    return;
   }
+  
+  res.json({
+    url: `${FRONTEND_URL}/data-deletion`,
+    confirmation_code: `gatekeeper-${Date.now()}`
+  });
+};
+
+router.post('/facebook/data-deletion', handleDataDeletion);
+
+// Test endpoint to get LinkedIn auth URL
+router.get('/linkedin/auth-url', (req: Request, res: Response) => {
+  const linkedinConfig = {
+    clientID: process.env.LINKEDIN_CLIENT_ID,
+    redirectURI: process.env.LINKEDIN_CALLBACK_URL || `${process.env.BACKEND_URL || 'http://localhost:5000'}/api/auth/linkedin/callback`,
+    scope: ['openid', 'profile', 'email'],
+    state: 'test-state-' + Date.now()
+  };
+
+  const authUrl = `https://www.linkedin.com/oauth/v2/authorization?` +
+    `response_type=code&` +
+    `client_id=${linkedinConfig.clientID}&` +
+    `redirect_uri=${encodeURIComponent(linkedinConfig.redirectURI)}&` +
+    `scope=${linkedinConfig.scope.join('%20')}&` +
+    `state=${linkedinConfig.state}`;
+
+  res.json({ authUrl });
 });
 
 export default router;

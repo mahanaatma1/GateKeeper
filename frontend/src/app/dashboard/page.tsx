@@ -4,18 +4,78 @@ import React, { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import EmailDisplay from '@/components/EmailDisplay';
+import ImageUploader from '@/components/dashboard/ImageUploader';
+import { toast, Toaster } from 'react-hot-toast';
+
+// Component to show when user is not authenticated
+const AuthError = ({ onRedirect }: { onRedirect: () => void }) => (
+  <div className="min-h-screen flex items-center justify-center">
+    <div className="text-center">
+      <p className="mb-4">Authentication issue. Please try logging in again.</p>
+      <button
+        onClick={onRedirect}
+        className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md"
+      >
+        Go to Login
+      </button>
+    </div>
+  </div>
+);
+
+// Loading spinner component
+const LoadingSpinner = () => (
+  <div className="min-h-screen flex items-center justify-center">
+    <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+  </div>
+);
+
+// User profile information component
+const UserInfo = ({ user, isOAuth }: { user: any, isOAuth: boolean }) => (
+  <div className="md:w-2/3 md:pl-8">
+    <h2 className="text-2xl font-bold mb-4">Welcome to your Dashboard</h2>
+    <p className="text-gray-600 mb-4">
+      You are now securely authenticated with GateKeeper.
+      {isOAuth && (
+        <span className="block mt-2">
+          You signed in using your {user.provider} account.
+        </span>
+      )}
+    </p>
+    <div className="mt-4">
+      <div className="bg-gray-50 p-3 rounded mb-3">
+        <p className="text-sm text-gray-500">Email</p>
+        <p className="font-medium">
+          {user.email ? (
+            <EmailDisplay 
+              email={user.email} 
+              style="full"
+            />
+          ) : 'Not available'}
+        </p>
+      </div>
+      
+      {(user.firstName || user.lastName) && (
+        <div className="bg-gray-50 p-3 rounded">
+          <p className="text-sm text-gray-500">Name</p>
+          <p className="font-medium">
+            {`${user.firstName || ''} ${user.lastName || ''}`.trim() || 'Not available'}
+          </p>
+        </div>
+      )}
+    </div>
+  </div>
+);
 
 export default function Dashboard() {
   const router = useRouter();
   const { user, setUser, logout, loading, getDisplayName } = useAuth();
   const searchParams = useSearchParams();
   const [initializing, setInitializing] = useState(false);
-  // Choose your preferred email display style
-  const emailDisplayStyle: 'full' | 'username' | 'masked' = 'full';
 
-  // Handle auth data from URL (Google OAuth)
+  // Process OAuth callback data
   useEffect(() => {
     const token = searchParams.get('token');
+    const refreshToken = searchParams.get('refreshToken');
     const userDataParam = searchParams.get('userData');
     
     if (token && userDataParam) {
@@ -24,9 +84,19 @@ export default function Dashboard() {
       try {
         // Parse and store user data
         const userData = JSON.parse(userDataParam);
+        
+        // Store authentication data
         localStorage.setItem('token', token);
+        if (refreshToken) {
+          localStorage.setItem('refreshToken', refreshToken);
+        }
         localStorage.setItem('user', userDataParam);
+        
+        // Set cookies for additional auth persistence
         document.cookie = `token=${token}; path=/; max-age=2592000`;
+        if (refreshToken) {
+          document.cookie = `refreshToken=${refreshToken}; path=/; max-age=2592000`;
+        }
         
         // Update auth context
         if (setUser) {
@@ -42,51 +112,35 @@ export default function Dashboard() {
       }
     }
   }, [searchParams, setUser]);
-
-  // Check authentication
+  
+  // Check authentication status
   useEffect(() => {
     if (!loading && !initializing && !user && !localStorage.getItem('token')) {
       router.push('/login');
     }
   }, [loading, initializing, user, router]);
 
-  // Loading state
+  // Handle loading state
   if (loading || initializing) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
-      </div>
-    );
+    return <LoadingSpinner />;
   }
 
-  // Fallback to localStorage if context hasn't updated yet
+  // Get user data (from context or localStorage fallback)
   const displayUser = user || (localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user') || '{}') : null);
   
+  // Show auth error if no user data available
   if (!displayUser) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-center">
-          <p className="mb-4">Authentication issue. Please try logging in again.</p>
-          <button
-            onClick={() => router.push('/login')}
-            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md"
-          >
-            Go to Login
-          </button>
-        </div>
-      </div>
-    );
+    return <AuthError onRedirect={() => router.push('/login')} />;
   }
 
-  // Determine if user logged in with an OAuth provider
+  // Determine if user logged in with OAuth
   const loggedInViaOAuth = displayUser.provider && displayUser.providerUsername;
-  
-  // Get the display name based on login method - will respect useProviderUsername flag
-  const displayName = getDisplayName ? getDisplayName(displayUser) : `${displayUser.firstName} ${displayUser.lastName}`;
 
-  // Main dashboard
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-100">
+      <Toaster position="top-right" />
+      
+      {/* Navigation bar */}
       <nav className="bg-white shadow">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between h-16">
@@ -104,54 +158,22 @@ export default function Dashboard() {
           </div>
         </div>
       </nav>
-
-      <main className="py-10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      
+      {/* Main content */}
+      <main className="container mx-auto px-4 py-8">
+        <div className="max-w-4xl mx-auto">
           <div className="bg-white shadow rounded-lg p-6">
-            <h2 className="text-2xl font-bold mb-4 text-center">Welcome to your Dashboard</h2>
-            <div className="text-gray-600">
-              <p className="text-center mb-4">
-                You are now securely authenticated with GateKeeper.
-                {loggedInViaOAuth && (
-                  <span className="block mt-2">
-                    You signed in using your {displayUser.provider} account.
-                  </span>
-                )}
-              </p>
-              
-              <div className="mt-6 border-t pt-4">
-                <h3 className="text-lg font-medium mb-2">Your Account Information</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="bg-gray-50 p-3 rounded">
-                    <p className="text-sm text-gray-500">Email</p>
-                    <p className="font-medium">
-                      {displayUser.email ? (
-                        <EmailDisplay 
-                          email={displayUser.email} 
-                          style="full"
-                        />
-                      ) : 'Not available'}
-                    </p>
-                  </div>
-                  {(displayUser.firstName || displayUser.lastName) && (
-                    <div className="bg-gray-50 p-3 rounded">
-                      <p className="text-sm text-gray-500">Name</p>
-                      <p className="font-medium">
-                        {`${displayUser.firstName || ''} ${displayUser.lastName || ''}`.trim() || 'Not available'}
-                      </p>
-                    </div>
-                  )}
-                  {loggedInViaOAuth && (
-                    <div className="bg-gray-50 p-3 rounded">
-                      <p className="text-sm text-gray-500">Connected Account</p>
-                      <p className="font-medium">
-                        {displayUser.provider} 
-                        {displayUser.providerUsername && ` (${displayUser.providerUsername})`}
-                      </p>
-                    </div>
-                  )}
-                </div>
+            <div className="flex flex-col md:flex-row items-center">
+              <div className="md:w-1/3 flex justify-center mb-6 md:mb-0">
+                <ImageUploader 
+                  onSuccess={() => toast.success('Profile image updated!')}
+                  onError={(error) => toast.error(error)}
+                />
               </div>
+              <UserInfo 
+                user={displayUser} 
+                isOAuth={loggedInViaOAuth} 
+              />
             </div>
           </div>
         </div>

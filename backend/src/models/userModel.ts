@@ -6,6 +6,7 @@ export interface IUser extends Document {
   lastName: string;
   email: string;
   password: string;
+  avatarUrl: string;
   isVerified: boolean;
   verificationCode?: string;
   verificationCodeExpires?: Date;
@@ -17,6 +18,7 @@ export interface IUser extends Document {
   githubId?: string;
   linkedinId?: string;
   facebookId?: string;
+  profileImage?: string;
 }
 
 // Schema definition
@@ -44,6 +46,10 @@ const userSchema = new Schema<IUser>(
       type: String,
       required: [true, 'Password is required'],
       minlength: [8, 'Password must be at least 8 characters']
+    },
+    avatarUrl: {
+      type: String,
+      default: ''
     },
     isVerified: {
       type: Boolean,
@@ -80,11 +86,26 @@ const userSchema = new Schema<IUser>(
       type: String,
       sparse: true,
       unique: true
+    },
+    profileImage: {
+      type: String
     }
   },
   {
     timestamps: true
   }
 );
+
+// Return a sanitized user object (without password)
+userSchema.methods.toJSON = function() {
+  const userObject = this.toObject();
+  delete userObject.password;
+  delete userObject.__v;
+  return userObject;
+};
+
+// Make sure the profileImage field is included in the default select
+userSchema.set('toJSON', { virtuals: true });
+userSchema.set('toObject', { virtuals: true });
 
 export default mongoose.model<IUser>('User', userSchema);

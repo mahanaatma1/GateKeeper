@@ -1,6 +1,13 @@
 import { IUser } from '../models/userModel';
 import mongoose from 'mongoose';
 import Session, { ISession } from '../models/sessionModel';
+import { v4 as uuidv4 } from 'uuid';
+import { Request, Response } from 'express';
+
+// Session cookie name
+export const SESSION_COOKIE = 'gatekeeper_session';
+// Session header (for API clients)
+export const SESSION_HEADER = 'x-session-id';
 
 // Interface to define the shape of a user session
 export interface UserSession {
@@ -12,15 +19,110 @@ export interface UserSession {
   expiresAt: Date;
 }
 
-/**
- * Create a new user session and store in database
- * @param sessionId Unique session identifier
- * @param user User object
- * @param userAgent Browser/client user agent
- * @param ip Client IP address
- * @param maxInactivityMinutes Session timeout in minutes (default 30)
- * @returns The created session
- */
+// Handle OAuth callback and create session
+export const handleOAuthCallback = async (req: Request, res: Response, user: IUser): Promise<void> => {
+  try {
+    // Generate tokens for the user
+    const { generateToken, generateRefreshToken } = await import('../utils/jwt');
+    const token = generateToken(user);
+    const refreshToken = generateRefreshToken(user);
+    
+    // Create MongoDB session with lax sameSite for OAuth redirects
+    await createAndSetSession(req, res, user, 'lax');
+    
+    // Prepare user data for the dashboard
+    const userWithoutPassword = {
+      _id: user._id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: user.email,
+      isVerified: user.isVerified,
+      providerUsername: (user as any).providerUsername || null,
+      provider: (user as any).provider || null,
+      useProviderUsername: (user as any).useProviderUsername || false
+    };
+    
+    // Construct dashboard URL with tokens and user data
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const dashboardUrl = `${frontendUrl}/dashboard?token=${encodeURIComponent(token)}&refreshToken=${encodeURIComponent(refreshToken)}&userData=${encodeURIComponent(JSON.stringify(userWithoutPassword))}`;
+    
+    // Use standard 302 redirect for maximum compatibility
+    res.writeHead(302, {
+      'Location': dashboardUrl
+    });
+    res.end();
+  } catch (error) {
+    // Redirect to login with error
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const redirectUrl = `${frontendUrl}/login?error=${encodeURIComponent('Authentication failed')}`;
+    res.redirect(redirectUrl);
+  }
+};
+
+// Redirect user to login page with error message
+export const redirectToLogin = (res: Response, errorMessage: string): void => {
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+  const redirectUrl = `${frontendUrl}/login?error=${encodeURIComponent(errorMessage)}`;
+  res.redirect(redirectUrl);
+};
+
+//Create session and set cookies/headers
+export const createAndSetSession = async (
+  req: Request,
+  res: Response,
+  user: IUser,
+  sameSitePolicy: 'strict' | 'lax' | 'none' = 'strict',
+  maxInactivityMinutes: number = 30
+): Promise<string> => {
+  const sessionId = uuidv4();
+  
+  try {
+    // Create session in database
+    await createSession(
+      sessionId,
+      user,
+      req.headers['user-agent'] as string,
+      req.ip,
+      maxInactivityMinutes
+    );
+    
+    // Set cookie
+    res.cookie(SESSION_COOKIE, sessionId, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: maxInactivityMinutes * 60 * 1000,
+      sameSite: sameSitePolicy
+    });
+    
+    // Set header for API clients
+    res.setHeader(SESSION_HEADER, sessionId);
+    
+    return sessionId;
+  } catch (error) {
+    throw new Error('Failed to create and set session');
+  }
+};
+
+// Check if request has a valid session
+export const hasValidSession = async (req: Request): Promise<boolean> => {
+  try {
+    const sessionId = req.cookies?.[SESSION_COOKIE] || req.headers[SESSION_HEADER] as string;
+    if (!sessionId) return false;
+    
+    const session = await getSession(sessionId);
+    return !!session;
+  } catch (error) {
+    return false;
+  }
+};
+
+// Clear session cookies and headers
+export const clearSessionCookies = (res: Response): void => {
+  res.clearCookie(SESSION_COOKIE);
+  res.removeHeader(SESSION_HEADER);
+};
+
+//Create a new session in the database
 export const createSession = async (
   sessionId: string,
   user: IUser,
@@ -65,16 +167,10 @@ export const createSession = async (
       expiresAt: session.expiresAt
     };
   } catch (error) {
-    console.error('Error creating session:', error);
     throw new Error('Failed to create session');
   }
 };
-
-/**
- * Get an active session by ID from database
- * @param sessionId The session ID
- * @returns The session or null if not found
- */
+//Get session by ID if it's still valid
 export const getSession = async (sessionId: string): Promise<UserSession | null> => {
   try {
     const session = await Session.findOne({ 
@@ -93,17 +189,11 @@ export const getSession = async (sessionId: string): Promise<UserSession | null>
       expiresAt: session.expiresAt
     };
   } catch (error) {
-    console.error('Error getting session:', error);
     return null;
   }
 };
 
-/**
- * Update the last activity time for a session
- * @param sessionId The session ID to update
- * @param maxInactivityMinutes Minutes to extend the session
- * @returns true if session was updated, false if session not found
- */
+// Update session activity timestamp
 export const updateSessionActivity = async (
   sessionId: string, 
   maxInactivityMinutes: number = 30
@@ -127,31 +217,19 @@ export const updateSessionActivity = async (
     
     return result.modifiedCount > 0;
   } catch (error) {
-    console.error('Error updating session activity:', error);
     return false;
   }
 };
-
-/**
- * Delete a user session from database
- * @param sessionId The session ID to remove
- * @returns true if session was deleted, false if session not found
- */
+//Delete a session by ID
 export const deleteSession = async (sessionId: string): Promise<boolean> => {
   try {
     const result = await Session.deleteOne({ sessionId });
     return result.deletedCount > 0;
   } catch (error) {
-    console.error('Error deleting session:', error);
     return false;
   }
 };
-
-/**
- * Get all active sessions for a user
- * @param userId The user ID
- * @returns Array of session IDs
- */
+//Get all valid session IDs for a user
 export const getUserSessions = async (userId: string): Promise<string[]> => {
   try {
     const sessions = await Session.find({ 
@@ -161,30 +239,19 @@ export const getUserSessions = async (userId: string): Promise<string[]> => {
     
     return sessions.map(session => session.sessionId);
   } catch (error) {
-    console.error('Error getting user sessions:', error);
     return [];
   }
 };
-
-/**
- * Delete all sessions for a user
- * @param userId The user ID
- * @returns The number of sessions deleted
- */
+//Delete all sessions for a user
 export const deleteUserSessions = async (userId: string): Promise<number> => {
   try {
     const result = await Session.deleteMany({ userId });
     return result.deletedCount;
   } catch (error) {
-    console.error('Error deleting user sessions:', error);
     return 0;
   }
 };
-
-/**
- * Clean up expired sessions
- * @returns Number of sessions cleaned up
- */
+ // Remove expired sessions from the database
 export const cleanupExpiredSessions = async (): Promise<number> => {
   try {
     const now = new Date();
@@ -194,15 +261,10 @@ export const cleanupExpiredSessions = async (): Promise<number> => {
     
     return result.deletedCount;
   } catch (error) {
-    console.error('Error cleaning up expired sessions:', error);
     return 0;
   }
 };
-
-/**
- * Get session count statistics
- * @returns Object with total sessions and active users count
- */
+// Get session statistics
 export const getSessionStats = async (): Promise<{
   totalSessions: number;
   activeUsers: number;
@@ -225,7 +287,6 @@ export const getSessionStats = async (): Promise<{
       activeUsers
     };
   } catch (error) {
-    console.error('Error getting session statistics:', error);
     return {
       totalSessions: 0,
       activeUsers: 0

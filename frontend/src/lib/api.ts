@@ -1,12 +1,17 @@
-// DEPRECATED - Use the new API client in src/services/api.ts instead
-
-// This file is kept for backward compatibility but will be removed in the future.
-// Please import from '@/services/api' instead.
-
-// Simple API client for backend communication
-import { getToken } from './auth';
+//import { getToken } from './auth';
 
 const API_URL = 'http://localhost:5000/api';
+
+interface ApiError extends Error {
+  response?: {
+    status: number;
+    data: {
+      message: string;
+      code?: string;
+      needsVerification?: boolean;
+    };
+  };
+}
 
 // Basic fetch wrapper with authentication
 async function fetchWithAuth(endpoint: string, options: RequestInit = {}) {
@@ -21,23 +26,39 @@ async function fetchWithAuth(endpoint: string, options: RequestInit = {}) {
     ...options.headers
   };
   
-  // Make the fetch request
-  const response = await fetch(`${API_URL}${endpoint}`, {
-    ...options,
-    headers
-  });
-  
-  // Check if the response is JSON
-  const isJson = response.headers.get('content-type')?.includes('application/json');
-  const data = isJson ? await response.json() : await response.text();
-  
-  // Handle API errors
-  if (!response.ok) {
-    const error = isJson ? data.message : 'An error occurred';
-    throw new Error(error || 'API request failed');
+  try {
+    // Make the fetch request
+    const response = await fetch(`${API_URL}${endpoint}`, {
+      ...options,
+      headers
+    });
+    
+    // Check if the response is JSON
+    const isJson = response.headers.get('content-type')?.includes('application/json');
+    const data = isJson ? await response.json() : await response.text();
+    
+    // Handle API errors
+    if (!response.ok) {
+      const error = new Error(isJson ? data.message : 'An error occurred') as ApiError;
+      error.response = {
+        status: response.status,
+        data: isJson ? data : { message: data }
+      };
+      throw error;
+    }
+    
+    return data;
+  } catch (error) {
+    // Ensure error has the expected structure
+    const apiError = error as ApiError;
+    if (!apiError.response) {
+      apiError.response = {
+        status: 500,
+        data: { message: 'Network error or server unavailable' }
+      };
+    }
+    throw apiError;
   }
-  
-  return data;
 }
 
 // API methods
@@ -80,9 +101,18 @@ export const api = {
     getUser: () => {
       return fetchWithAuth('/users/me');
     },
-    
-    // OAuth URLs - commented out as not implemented yet
-    // googleAuthUrl: `${API_URL}/auth/google`,
-    // githubAuthUrl: `${API_URL}/auth/github`
   }
 };
+
+// Token management functions
+export function getToken(): string | null {
+  return localStorage.getItem('token');
+}
+
+export function setToken(token: string): void {
+  localStorage.setItem('token', token);
+}
+
+export function removeToken(): void {
+  localStorage.removeItem('token');
+}

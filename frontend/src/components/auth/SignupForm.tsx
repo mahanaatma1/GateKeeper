@@ -148,16 +148,13 @@ export default function SignupForm({ onSubmitSuccess }: SignupFormProps) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log("Form submitted with data:", formData);
     
     // Validate form before submission
     if (!validateForm()) {
-      console.log("Form validation failed");
       return;
     }
     
     try {
-      console.log("Attempting to register user:", formData.email);
       // Register user in the database
       const response = await register(
         formData.firstName,
@@ -166,24 +163,16 @@ export default function SignupForm({ onSubmitSuccess }: SignupFormProps) {
         formData.password
       );
       
-      console.log("Registration successful:", response);
-      
       // Store token if available
       if (response && response.token) {
-        console.log("Storing token in localStorage");
         localStorage.setItem('token', response.token);
       }
       
       // Call success callback with the email to redirect to verification page
       if (onSubmitSuccess) {
-        console.log("Calling onSubmitSuccess with email:", formData.email);
         onSubmitSuccess(formData.email);
-      } else {
-        console.log("No onSubmitSuccess callback provided");
       }
     } catch (err: any) {
-      console.error("Registration error:", err);
-      
       // Check for email already exists error - handle 400 status code
       if (err.response?.status === 400 || 
           err.response?.data?.code === 'EMAIL_EXISTS' || 
